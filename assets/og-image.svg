@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="ogTitle">
+  <title id="ogTitle">LoopCampus Digital Studio social preview image</title>
+  <rect width="1200" height="630" fill="#FBF7F0" />
+  <rect x="180" y="230" width="320" height="170" rx="24" fill="#1E1B4B" />
+  <circle cx="240" cy="315" r="44" fill="#FF7A59" />
+  <circle cx="240" cy="315" r="18" fill="#FBF7F0" />
+  <text x="300" y="330" font-family="Fredoka, sans-serif" font-weight="700" font-size="48" fill="#FBF7F0">Loop<tspan fill="#FF7A59">Campus</tspan></text>
+  <text x="180" y="460" font-family="DM Sans, sans-serif" font-weight="700" font-size="30" fill="#2B2545">Get your business found online</text>
+</svg>
