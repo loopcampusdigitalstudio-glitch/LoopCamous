@@ -34,10 +34,16 @@ if (process.env.NODE_ENV === 'production' && JWT_SECRET === 'change-me-in-produc
   process.exit(1);
 }
 
-// Razorpay instance (test mode keys work in sandbox)
-const razorpay = new Razorpay({
-  key_id: RAZORPAY_KEY_ID,
-  key_secret: RAZORPAY_KEY_SECRET,
+// Razorpay instance (optional — only if keys are provided)
+let razorpay = null;
+if (RAZORPAY_KEY_ID && RAZORPAY_KEY_SECRET && RAZORPAY_KEY_ID.startsWith('rzp_')) {
+  razorpay = new Razorpay({
+    key_id: RAZORPAY_KEY_ID,
+    key_secret: RAZORPAY_KEY_SECRET,
+  });
+} else {
+  console.log('Razorpay not configured — payments disabled');
+}
 });
 
 // ---------- SQLite database ----------
