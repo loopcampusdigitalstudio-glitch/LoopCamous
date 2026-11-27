@@ -1,544 +1,820 @@
-require('dotenv').config();
-const path = require('path');
-const fs = require('fs');
-const express = require('express');
-const cors = require('cors');
-const helmet = require('helmet');
-const rateLimit = require('express-rate-limit');
-const cookieParser = require('cookie-parser');
-const jwt = require('jsonwebtoken');
-const bcrypt = require('bcryptjs');
-const sqlite3 = require('sqlite3').verbose();
-const Razorpay = require('razorpay');
-const crypto = require('crypto');
-const validator = require('validator');
-const multer = require('multer');
+const API_BASE = 'https://loopcamous.onrender.com';
 
-const app = express();
-const PORT = process.env.PORT || 3000;
-const FRONTEND_URL = process.env.FRONTEND_URL || 'https://loopcampus.online';
-const JWT_SECRET = process.env.JWT_SECRET || 'change-me-in-production';
-const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID;
-const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
-const WEBHOOK_SECRET = process.env.RAZORPAY_WEBHOOK_SECRET;
+let isAuthenticated = false;
+let unsavedChanges = false;
 
-if (process.env.NODE_ENV === 'production' && JWT_SECRET === 'change-me-in-production') {
-  console.error('FATAL: JWT_SECRET must be set in production');
-  process.exit(1);
-}
+const screenLogin = document.getElementById('screen-login');
+const screenDashboard = document.getElementById('screen-dashboard');
+const formLogin = document.getElementById('form-login');
+const loginError = document.getElementById('login-error');
+const btnLogin = document.getElementById('btn-login');
+const btnLogout = document.getElementById('btn-logout');
+const btnPreview = document.getElementById('btn-preview');
 
-// Razorpay instance (optional)
-let razorpay = null;
-if (RAZORPAY_KEY_ID && RAZORPAY_KEY_SECRET && RAZORPAY_KEY_ID.startsWith('rzp_')) {
-  razorpay = new Razorpay({
-    key_id: RAZORPAY_KEY_ID,
-    key_secret: RAZORPAY_KEY_SECRET,
-  });
-} else {
-  console.log('Razorpay not configured — payments disabled');
-}
+async function api(endpoint, options = {}) {
+  const url = `${API_BASE}${endpoint}`;
+  const headers = { 'Content-Type': 'application/json', ...options.headers };
+  const config = { ...options, headers, credentials: 'include' };
 
-// ---------- SQLite database ----------
-const db = new sqlite3.Database('./loopcampus.db', (err) => {
-  if (err) console.error('Database connection error:', err.message);
-  else initializeDatabase();
-});
+  const res = await fetch(url, config);
 
-function initializeDatabase() {
-  db.serialize(() => {
-    db.run(`CREATE TABLE IF NOT EXISTS admins (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      email TEXT UNIQUE NOT NULL,
-      password_hash TEXT NOT NULL,
-      role TEXT DEFAULT 'admin',
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
-
-    db.run(`CREATE TABLE IF NOT EXISTS settings (
-      key TEXT PRIMARY KEY,
-      value TEXT NOT NULL,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
-
-    db.run(`CREATE TABLE IF NOT EXISTS services (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      title TEXT NOT NULL,
-      tag TEXT,
-      description TEXT,
-      published INTEGER DEFAULT 1,
-      sort_order INTEGER DEFAULT 0,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
-
-    db.run(`CREATE TABLE IF NOT EXISTS packs (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      price TEXT NOT NULL,
-      badge TEXT,
-      is_featured INTEGER DEFAULT 0,
-      published INTEGER DEFAULT 1,
-      sort_order INTEGER DEFAULT 0,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
-
-    db.run(`CREATE TABLE IF NOT EXISTS pack_features (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      pack_id INTEGER NOT NULL,
-      feature TEXT NOT NULL,
-      sort_order INTEGER DEFAULT 0,
-      FOREIGN KEY (pack_id) REFERENCES packs(id) ON DELETE CASCADE
-    )`);
-
-    db.run(`CREATE TABLE IF NOT EXISTS team_members (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      role TEXT,
-      description TEXT,
-      image_url TEXT,
-      published INTEGER DEFAULT 1,
-      sort_order INTEGER DEFAULT 0,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
-
-    db.run(`CREATE TABLE IF NOT EXISTS payments (
-      razorpay_payment_id TEXT PRIMARY KEY,
-      razorpay_order_id TEXT NOT NULL,
-      razorpay_signature TEXT,
-      amount INTEGER NOT NULL,
-      currency TEXT NOT NULL DEFAULT 'INR',
-      status TEXT NOT NULL,
-      pack_name TEXT,
-      customer_email TEXT,
-      customer_name TEXT,
-      received_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      verified INTEGER DEFAULT 0
-    )`);
-
-    // Seed default admin
-    db.get('SELECT id FROM admins LIMIT 1', (err, row) => {
-      if (err) return;
-      if (!row) {
-        const hash = bcrypt.hashSync(process.env.ADMIN_PASSWORD || 'loopcampus@2024', 10);
-        db.run(
-          'INSERT INTO admins (email, password_hash, role) VALUES (?, ?, ?)',
-          [process.env.ADMIN_USERNAME || 'loopcampus.online', hash, 'admin'],
-        );
-      }
-    });
-
-    // Seed default settings
-    db.get('SELECT key FROM settings LIMIT 1', (err, row) => {
-      if (err) return;
-      if (!row) {
-        const defaults = [
-          ['hero_title', 'Get your business found online'],
-          ['hero_sub', "We're a student-run digital studio helping local shops, cafés, tuition centres and salons show up on Google and Instagram — without agency prices."],
-          ['problem_title', 'Why local businesses need us'],
-          ['problem_intro', 'Small shops and salons lose customers every day because they are hard to find online.'],
-          ['services_title', 'What we do'],
-          ['services_intro', 'Packs built for small local businesses — pick one, or ask us for a custom mix.'],
-          ['steps_title', 'How it works'],
-          ['steps_intro', 'Five simple steps from hello to going live.'],
-          ['packs_title', 'Our packs'],
-          ['packs_intro', 'Simple pricing for small businesses. All prices are one-time setup fees in Indian rupees (₹).'],
-          ['team_title', 'Meet the team'],
-          ['team_intro', 'Students, supervised by a faculty mentor.'],
-          ['contact_title', 'Get in touch'],
-          ['contact_intro', 'Have a shop, café, tuition centre or salon? Let us talk.'],
-          ['footer_name', 'Loop<span class="logo-accent">Campus</span> Digital Studio'],
-          ['footer_note', 'A school-supervised student enterprise'],
-          ['footer_year', '2026'],
-          ['whatsapp', '9148156509'],
-          ['contact_email', 'loopcampusdigitalstudio@gmail.com'],
-          ['instagram', 'r4kunchi'],
-        ];
-        const stmt = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)');
-        for (const [k, v] of defaults) stmt.run(k, v);
-        stmt.finalize();
-      }
-    });
-
-    // Seed default services
-    db.get('SELECT id FROM services LIMIT 1', (err, row) => {
-      if (err) return;
-      if (!row) {
-        const services = [
-          ['Google Business Profile', 'Google', 'We set up and optimise your profile so customers find you on Google Search and Maps.', 1, 0],
-          ['Instagram page and posts', 'Instagram', 'We create your Instagram page and design posts that showcase your shop, café or salon.', 1, 1],
-          ['Logo and posters', 'Brand', 'Friendly logos and posters for your storefront, windows and social media.', 1, 2],
-          ['30-day content calendar', 'Planning', 'A ready-to-post calendar so you always know what to share and when.', 1, 3],
-        ];
-        const stmt = db.prepare('INSERT INTO services (title, tag, description, published, sort_order) VALUES (?, ?, ?, ?, ?)');
-        for (const s of services) stmt.run(...s);
-        stmt.finalize();
-      }
-    });
-
-    // Seed default packs
-    db.get('SELECT id FROM packs LIMIT 1', (err, row) => {
-      if (err) return;
-      if (!row) {
-        const packs = [
-          ['Starter', '3,000', '', 0, 1, 0],
-          ['Standard', '4,000', 'Most popular', 1, 1, 1],
-          ['Plus', '5,000', '', 0, 1, 2],
-        ];
-        const stmt = db.prepare('INSERT INTO packs (name, price, badge, is_featured, published, sort_order) VALUES (?, ?, ?, ?, ?, ?)');
-        for (const p of packs) stmt.run(...p);
-        stmt.finalize(() => {
-          db.all('SELECT id, name FROM packs', (err, rows) => {
-            if (err) return;
-            const featuresMap = {
-              Starter: ['Google Business Profile setup', 'Basic Instagram page setup', 'One logo design'],
-              Standard: ['Everything in Starter', 'Ten Instagram posts', '30-day content calendar', 'Three poster designs'],
-              Plus: ['Everything in Standard', 'A month of weekly content', 'Five poster designs', 'Priority support'],
-            };
-            const featStmt = db.prepare('INSERT INTO pack_features (pack_id, feature, sort_order) VALUES (?, ?, ?)');
-            for (const pack of rows) {
-              const feats = featuresMap[pack.name] || [];
-              feats.forEach((f, idx) => featStmt.run(pack.id, f, idx));
-            }
-            featStmt.finalize();
-          });
-        });
-      }
-    });
-
-    // Seed default team
-    db.get('SELECT id FROM team_members LIMIT 1', (err, row) => {
-      if (err) return;
-      if (!row) {
-        const team = [
-          ['RAHUL KUNCHIPUDI', 'Founder & Lead Designer', 'Designs logos, posters and brand identity for local businesses.', null, 1, 0],
-          ['ABHIGNYA HATHI', 'Social Media Lead', 'Runs Instagram pages and content calendars.', null, 1, 1],
-          ['AGASTHYA SHASTRY', 'Google Business Lead', 'Helps businesses show up on Google Search and Maps.', null, 1, 2],
-          ['VRISHA VISHWANATH', 'Content Creator', 'Writes captions and plans posts.', null, 1, 3],
-          ['ALIYA SHAIKH', 'Client Manager', 'Your first point of contact for packs and approvals.', null, 1, 4],
-          ['CHARVI', 'Photographer', 'Captures photos of your shop, café or salon.', null, 1, 5],
-          ['THANSICA', 'Operations & Admin', 'Keeps schedules, approvals and deliveries on track.', null, 1, 6],
-          ['Gagan Ponnappa', 'Faculty Mentor', 'School-supervised guidance and oversight of the studio.', null, 1, 7],
-        ];
-        const stmt = db.prepare('INSERT INTO team_members (name, role, description, image_url, published, sort_order) VALUES (?, ?, ?, ?, ?, ?)');
-        for (const m of team) stmt.run(...m);
-        stmt.finalize();
-      }
-    });
-  });
-}
-
-// ---------- Middleware ----------
-app.use(helmet());
-app.use(cookieParser());
-app.use(express.json({ limit: '1mb' }));
-app.use(express.urlencoded({ extended: true }));
-
-app.use(cors({ origin: FRONTEND_URL, credentials: true }));
-
-const apiLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100 });
-app.use('/api/', apiLimiter);
-
-const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20 });
-
-// ---------- Image upload ----------
-const uploadDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadDir),
-  filename: (req, file, cb) => {
-    const unique = Date.now() + '-' + Math.round(Math.random() * 1000);
-    cb(null, unique + '-' + file.originalname.replace(/\s+/g, '_'));
+  if (res.status === 401) {
+    isAuthenticated = false;
+    showScreen('login');
+    throw new Error('Authentication required — please sign in again.');
   }
-});
-const upload = multer({
-  storage,
-  limits: { fileSize: 5 * 1024 * 1024 },
-  fileFilter: (req, file, cb) => {
-    if (!file.mimetype.startsWith('image/')) return cb(new Error('Only image files are allowed'), false);
-    cb(null, true);
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(data.error || 'Request failed');
+    err.status = res.status;
+    err.data = data;
+    throw err;
   }
-});
-
-app.use('/uploads', express.static(uploadDir));
-app.use(express.static(path.join(__dirname, '..')));
-app.use('/admin', express.static(path.join(__dirname, '..', 'admin')));
-
-app.post('/api/admin/upload-image', authenticateAdmin, upload.single('image'), (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'No image uploaded' });
-  res.json({ imageUrl: `/uploads/${req.file.filename}` });
-});
-
-// ---------- Auth helpers ----------
-function generateToken(admin) {
-  return jwt.sign({ id: admin.id, email: admin.email, role: admin.role }, JWT_SECRET, { expiresIn: '8h' });
+  return data;
 }
-function setAuthCookie(res, token) {
-  res.cookie('token', token, { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax', maxAge: 8 * 60 * 60 * 1000, path: '/' });
-}
-function clearAuthCookie(res) { res.clearCookie('token', { path: '/' }); }
-function authenticateAdmin(req, res, next) {
-  const token = req.cookies.token;
-  if (!token) return res.status(401).json({ error: 'Authentication required' });
+
+async function checkAuth() {
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    req.admin = { id: decoded.id, email: decoded.email, role: decoded.role };
-    next();
-  } catch { return res.status(401).json({ error: 'Invalid or expired token' }); }
+    const data = await api('/api/admin/me');
+    isAuthenticated = true;
+    return data;
+  } catch {
+    isAuthenticated = false;
+    return null;
+  }
 }
-// Placeholder
-function authenticateAdminPlaceholder(req, res, next) { authenticateAdmin(req, res, next); }
 
-// ---------- Routes ----------
-app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
+async function login(username, password) {
+  const data = await api('/api/admin/login', {
+    method: 'POST',
+    body: JSON.stringify({ email: username, password }),
+  });
+  isAuthenticated = true;
+  return data;
+}
 
-app.post('/api/admin/login', authLimiter, (req, res) => {
-  const { email, password } = req.body;
-  if (!email || !password) return res.status(400).json({ error: 'Valid email/username and password required' });
-  db.get('SELECT * FROM admins WHERE email = ?', [email], (err, admin) => {
-    if (err) return res.status(500).json({ error: 'Database error' });
-    if (!admin) return res.status(401).json({ error: 'Invalid credentials' });
-    bcrypt.compare(password, admin.password_hash, (err, match) => {
-      if (err || !match) return res.status(401).json({ error: 'Invalid credentials' });
-      const token = generateToken(admin);
-      setAuthCookie(res, token);
-      res.json({ message: 'Logged in', admin: { id: admin.id, email: admin.email, role: admin.role } });
+async function logout() {
+  try {
+    await api('/api/admin/logout', { method: 'POST' });
+  } finally {
+    isAuthenticated = false;
+    showScreen('login');
+    unsavedChanges = false;
+  }
+}
+
+function showScreen(name) {
+  screenLogin.classList.toggle('hidden', name !== 'login');
+  screenDashboard.classList.toggle('hidden', name !== 'dashboard');
+}
+
+const navItems = document.querySelectorAll('.nav-item');
+const tabPanels = document.querySelectorAll('.tab-panel');
+
+function showTab(tabId) {
+  navItems.forEach((item) => item.classList.toggle('active', item.dataset.tab === tabId));
+  tabPanels.forEach((panel) => panel.classList.toggle('active', panel.id === `tab-${tabId}`));
+  if (tabId === 'services') loadServices();
+  if (tabId === 'packs') loadPacks();
+  if (tabId === 'team') loadTeam();
+  if (tabId === 'publish') loadPublishStatus();
+}
+
+navItems.forEach((item) => item.addEventListener('click', () => showTab(item.dataset.tab)));
+
+function markUnsaved() { unsavedChanges = true; }
+window.addEventListener('beforeunload', (e) => {
+  if (unsavedChanges) { e.preventDefault(); e.returnValue = 'You have unsaved changes. Are you sure you want to leave?'; }
+});
+function clearUnsaved() { unsavedChanges = false; }
+
+formLogin.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  btnLogin.disabled = true;
+  btnLogin.textContent = 'Signing in...';
+  loginError.textContent = '';
+
+  const username = document.getElementById('login-username').value.trim();
+  const password = document.getElementById('login-password').value;
+
+  try {
+    await login(username, password);
+    showScreen('dashboard');
+    await loadHomeForm();
+    loadImageForm();
+    loadContactForm();
+    loadPublishStatus();
+    clearUnsaved();
+  } catch (err) {
+    loginError.textContent = err.message || 'Login failed. Please try again.';
+  } finally {
+    btnLogin.disabled = false;
+    btnLogin.textContent = 'Sign in';
+  }
+});
+
+btnLogout.addEventListener('click', logout);
+btnPreview.addEventListener('click', () => window.open('../index.html', '_blank'));
+
+/* ---------- Home Tab ---------- */
+const homeFields = ['hero_title', 'hero_sub', 'problem_title', 'problem_intro', 'services_title', 'services_intro', 'steps_title', 'steps_intro', 'packs_title', 'packs_intro', 'team_title', 'team_intro', 'contact_title', 'contact_intro', 'footer_name', 'footer_note', 'footer_year'];
+const jsonArrayFields = ['problem_items', 'steps_items'];
+
+async function loadHomeForm() {
+  try {
+    const settings = await api('/api/admin/settings');
+    homeFields.forEach((key) => {
+      const el = document.getElementById(`h-${key}`);
+      if (el && settings[key] !== undefined) el.value = settings[key];
     });
-  });
-});
-
-app.post('/api/admin/logout', authenticateAdmin, (req, res) => { clearAuthCookie(res); res.json({ message: 'Logged out' }); });
-app.get('/api/admin/me', authenticateAdmin, (req, res) => res.json({ admin: req.admin }));
-
-// Public API
-app.get('/api/public/settings', (req, res) => {
-  db.all('SELECT key, value FROM settings', (err, rows) => {
-    if (err) return res.status(500).json({ error: 'Database error' });
-    const obj = {};
-    rows.forEach((r) => (obj[r.key] = r.value));
-    res.json(obj);
-  });
-});
-
-app.get('/api/public/services', (req, res) => {
-  db.all('SELECT * FROM services WHERE published = 1 ORDER BY sort_order ASC, id ASC', (err, rows) => {
-    if (err) return res.status(500).json({ error: 'Database error' });
-    res.json(rows);
-  });
-});
-
-app.get('/api/public/packs', (req, res) => {
-  db.all('SELECT * FROM packs WHERE published = 1 ORDER BY sort_order ASC, id ASC', (err, rows) => {
-    if (err) return res.status(500).json({ error: 'Database error' });
-    const packIds = rows.map((p) => p.id).join(',');
-    if (!packIds) return res.json(rows);
-    db.all(`SELECT pack_id, feature, sort_order FROM pack_features WHERE pack_id IN (${packIds}) ORDER BY pack_id, sort_order`, (err2, features) => {
-      if (err2) return res.status(500).json({ error: 'Database error' });
-      const byPack = {};
-      features.forEach((f) => { if (!byPack[f.pack_id]) byPack[f.pack_id] = []; byPack[f.pack_id].push(f.feature); });
-      res.json(rows.map((p) => ({ ...p, features: byPack[p.id] || [] })));
+    jsonArrayFields.forEach((key) => {
+      const el = document.getElementById(`h-${key}`);
+      if (el && settings[key]) {
+        try { el.value = JSON.stringify(JSON.parse(settings[key]), null, 2); } catch (e) { el.value = settings[key]; }
+      }
     });
+  } catch (err) {
+    showMsg('msg-home', 'Failed to load settings', 'error');
+  }
+}
+
+document.getElementById('form-home').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = e.target.querySelector('button[type="submit"]');
+  btn.disabled = true;
+  btn.textContent = 'Saving...';
+
+  const payload = {};
+  homeFields.forEach((key) => {
+    const el = document.getElementById(`h-${key}`);
+    if (el) payload[key] = el.value;
   });
-});
-
-app.get('/api/public/team', (req, res) => {
-  db.all('SELECT * FROM team_members WHERE published = 1 ORDER BY sort_order ASC, id ASC', (err, rows) => {
-    if (err) return res.status(500).json({ error: 'Database error' });
-    res.json(rows);
-  });
-});
-
-// Admin API
-app.get('/api/admin/settings', authenticateAdmin, (req, res) => {
-  db.all('SELECT key, value FROM settings', (err, rows) => {
-    if (err) return res.status(500).json({ error: 'Database error' });
-    const obj = {};
-    rows.forEach((r) => (obj[r.key] = r.value));
-    res.json(obj);
-  });
-});
-
-app.put('/api/admin/settings', authenticateAdmin, (req, res) => {
-  const updates = req.body;
-  if (!updates || typeof updates !== 'object') return res.status(400).json({ error: 'Invalid body' });
-  const keys = Object.keys(updates);
-  if (keys.length === 0) return res.status(400).json({ error: 'Nothing to update' });
-  db.serialize(() => {
-    db.run('BEGIN TRANSACTION');
-    const stmt = db.prepare('INSERT INTO settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP');
-    let completed = 0;
-    keys.forEach((k) => stmt.run(k, String(updates[k]), (err) => {
-      if (err) { db.run('ROLLBACK'); return res.status(500).json({ error: 'Database error' }); }
-      completed++;
-      if (completed === keys.length) db.run('COMMIT', (err) => { if (err) return res.status(500).json({ error: 'Commit failed' }); res.json({ message: 'Settings saved' }); });
-    }));
-    stmt.finalize();
-  });
-});
-
-// Services CRUD
-app.get('/api/admin/services', authenticateAdmin, (req, res) => {
-  db.all('SELECT * FROM services ORDER BY sort_order ASC, id ASC', (err, rows) => { if (err) return res.status(500).json({ error: 'Database error' }); res.json(rows); });
-});
-
-app.post('/api/admin/services', authenticateAdmin, (req, res) => {
-  const { title, tag, description, published, sort_order } = req.body;
-  if (!title) return res.status(400).json({ error: 'Title required' });
-  db.run('INSERT INTO services (title, tag, description, published, sort_order) VALUES (?, ?, ?, ?, ?)', [title, tag || '', description || '', published ? 1 : 0, sort_order || 0], function (err) { if (err) return res.status(500).json({ error: 'Database error' }); res.status(201).json({ id: this.lastID }); });
-});
-
-app.put('/api/admin/services/:id', authenticateAdmin, (req, res) => {
-  const { title, tag, description, published, sort_order } = req.body;
-  db.run('UPDATE services SET title = COALESCE(?, title), tag = COALESCE(?, tag), description = COALESCE(?, description), published = COALESCE(?, published), sort_order = COALESCE(?, sort_order), updated_at = CURRENT_TIMESTAMP WHERE id = ?', [title, tag, description, published, sort_order, req.params.id], function (err) { if (err) return res.status(500).json({ error: 'Database error' }); if (this.changes === 0) return res.status(404).json({ error: 'Not found' }); res.json({ message: 'Updated' }); });
-});
-
-app.delete('/api/admin/services/:id', authenticateAdmin, (req, res) => {
-  db.run('DELETE FROM services WHERE id = ?', [req.params.id], function (err) { if (err) return res.status(500).json({ error: 'Database error' }); if (this.changes === 0) return res.status(404).json({ error: 'Not found' }); res.json({ message: 'Deleted' }); });
-});
-
-app.post('/api/admin/services/:id/move', authenticateAdmin, (req, res) => {
-  const { direction } = req.body;
-  if (direction !== -1 && direction !== 1) return res.status(400).json({ error: 'Invalid direction' });
-  db.get('SELECT sort_order FROM services WHERE id = ?', [req.params.id], (err, row) => {
-    if (err) return res.status(500).json({ error: 'Database error' });
-    if (!row) return res.status(404).json({ error: 'Not found' });
-    const currentSort = row.sort_order;
-    const targetSort = currentSort + direction;
-    db.get('SELECT id FROM services WHERE sort_order = ? AND id != ?', [targetSort, req.params.id], (err2, target) => {
-      if (err2) return res.status(500).json({ error: 'Database error' });
-      if (!target) return res.json({ message: 'Cannot move further' });
-      db.serialize(() => {
-        db.run('BEGIN TRANSACTION');
-        db.run('UPDATE services SET sort_order = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [targetSort, req.params.id]);
-        db.run('UPDATE services SET sort_order = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [currentSort, target.id]);
-        db.run('COMMIT', (err3) => { if (err3) { db.run('ROLLBACK'); return res.status(500).json({ error: 'Reorder failed' }); } res.json({ message: 'Reordered' }); });
-      });
-    });
-  });
-});
-
-// Packs CRUD
-app.get('/api/admin/packs', authenticateAdmin, (req, res) => {
-  db.all('SELECT * FROM packs ORDER BY sort_order ASC, id ASC', (err, rows) => {
-    if (err) return res.status(500).json({ error: 'Database error' });
-    db.all('SELECT * FROM pack_features ORDER BY pack_id, sort_order', (err2, features) => {
-      if (err2) return res.status(500).json({ error: 'Database error' });
-      const byPack = {};
-      features.forEach((f) => { if (!byPack[f.pack_id]) byPack[f.pack_id] = []; byPack[f.pack_id].push({ id: f.id, feature: f.feature, sort_order: f.sort_order }); });
-      res.json(rows.map((p) => ({ ...p, features: byPack[p.id] || [] })));
-    });
-  });
-});
-
-app.post('/api/admin/packs', authenticateAdmin, (req, res) => {
-  const { name, price, badge, is_featured, published, sort_order, features } = req.body;
-  if (!name || !price) return res.status(400).json({ error: 'Name and price required' });
-  db.run('INSERT INTO packs (name, price, badge, is_featured, published, sort_order) VALUES (?, ?, ?, ?, ?, ?)', [name, price, badge || '', is_featured ? 1 : 0, published ? 1 : 0, sort_order || 0], function (err) {
-    if (err) return res.status(500).json({ error: 'Database error' });
-    const packId = this.lastID;
-    if (features && Array.isArray(features)) {
-      const stmt = db.prepare('INSERT INTO pack_features (pack_id, feature, sort_order) VALUES (?, ?, ?)');
-      features.forEach((f, idx) => stmt.run(packId, f, idx));
-      stmt.finalize();
+  jsonArrayFields.forEach((key) => {
+    const el = document.getElementById(`h-${key}`);
+    if (el) {
+      try { payload[key] = JSON.parse(el.value || '[]'); } catch (err) { payload[key] = []; }
     }
-    res.status(201).json({ id: packId });
   });
+
+  try {
+    await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify(payload) });
+    showMsg('msg-home', 'All text saved.', 'success');
+    clearUnsaved();
+  } catch (err) {
+    showMsg('msg-home', err.data?.error || 'Save failed.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Save all text';
+  }
 });
 
-app.put('/api/admin/packs/:id', authenticateAdmin, (req, res) => {
-  const { name, price, badge, is_featured, published, sort_order } = req.body;
-  db.run('UPDATE packs SET name = COALESCE(?, name), price = COALESCE(?, price), badge = COALESCE(?, badge), is_featured = COALESCE(?, is_featured), published = COALESCE(?, published), sort_order = COALESCE(?, sort_order), updated_at = CURRENT_TIMESTAMP WHERE id = ?', [name, price, badge, is_featured, published, sort_order, req.params.id], function (err) { if (err) return res.status(500).json({ error: 'Database error' }); if (this.changes === 0) return res.status(404).json({ error: 'Not found' }); res.json({ message: 'Updated' }); });
+/* ---------- Images Tab ---------- */
+const imageFields = ['logo_url', 'hero_image_url'];
+
+async function loadImageForm() {
+  try {
+    const settings = await api('/api/admin/settings');
+    updateLogoPreview(settings.logo_url);
+    updateHeroPreview(settings.hero_image_url);
+  } catch (err) {
+    showMsg('msg-images', 'Failed to load images', 'error');
+  }
+}
+
+function updateLogoPreview(url) {
+  const img = document.getElementById('logo-preview-img');
+  if (img) img.src = url || '../assets/logo.svg';
+}
+
+function updateHeroPreview(url) {
+  const img = document.getElementById('hero-preview-img');
+  if (img) img.src = url || '../assets/hero-illustration.svg';
+}
+
+async function uploadImage(fileInputId, previewImgId, settingsKey) {
+  const fileInput = document.getElementById(fileInputId);
+  const file = fileInput.files[0];
+  if (!file) return;
+
+  const formData = new FormData();
+  formData.append('image', file);
+
+  try {
+    const res = await fetch(`${API_BASE}/api/admin/upload-image`, {
+      method: 'POST',
+      credentials: 'include',
+      body: formData,
+    });
+    const data = await res.json();
+    if (res.ok && data.imageUrl) {
+      document.getElementById(previewImgId).src = data.imageUrl;
+      document.getElementById(`s-${settingsKey}`).value = data.imageUrl;
+      showMsg('msg-images', 'Image uploaded.', 'success');
+      markUnsaved();
+    } else {
+      showMsg('msg-images', 'Upload failed. Please try again.', 'error');
+    }
+  } catch (err) {
+    showMsg('msg-images', 'Upload error. Please try again.', 'error');
+  }
+}
+
+async function saveImages() {
+  const btn = document.querySelector('#form-images .btn-save');
+  btn.disabled = true;
+  btn.textContent = 'Saving...';
+
+  try {
+    const logoFile = document.getElementById('logo-file').files[0];
+    if (logoFile) await uploadImage('logo-file', 'logo-preview-img', 'logo_url');
+
+    const heroFile = document.getElementById('hero-file').files[0];
+    if (heroFile) await uploadImage('hero-file', 'hero-preview-img', 'hero_image_url');
+
+    const payload = {};
+    imageFields.forEach((key) => {
+      const el = document.getElementById(`s-${key}`);
+      if (el && el.value) payload[key] = el.value;
+    });
+    if (Object.keys(payload).length > 0) {
+      await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify(payload) });
+    }
+
+    showMsg('msg-images', 'Images saved.', 'success');
+    clearUnsaved();
+  } catch (err) {
+    showMsg('msg-images', err.data?.error || 'Save failed.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Save images';
+  }
+}
+
+document.getElementById('logo-file')?.addEventListener('change', (e) => {
+  const f = e.target.files[0];
+  if (f) document.getElementById('logo-preview-img').src = URL.createObjectURL(f);
+});
+document.getElementById('hero-file')?.addEventListener('change', (e) => {
+  const f = e.target.files[0];
+  if (f) document.getElementById('hero-preview-img').src = URL.createObjectURL(f);
+});
+document.getElementById('nm-file')?.addEventListener('change', (e) => {
+  const f = e.target.files[0];
+  if (f) document.getElementById('nm-preview').querySelector('img').src = URL.createObjectURL(f);
 });
 
-app.delete('/api/admin/packs/:id', authenticateAdmin, (req, res) => {
-  db.run('DELETE FROM packs WHERE id = ?', [req.params.id], function (err) { if (err) return res.status(500).json({ error: 'Database error' }); if (this.changes === 0) return res.status(404).json({ error: 'Not found' }); res.json({ message: 'Deleted' }); });
-});
+/* ---------- Services Tab ---------- */
+async function loadServices() {
+  try {
+    const services = await api('/api/admin/services');
+    renderServiceList(services);
+  } catch (err) {
+    showMsg('msg-services', 'Failed to load services', 'error');
+  }
+}
 
-app.post('/api/admin/packs/:id/move', authenticateAdmin, (req, res) => {
-  const { direction } = req.body;
-  if (direction !== -1 && direction !== 1) return res.status(400).json({ error: 'Invalid direction' });
-  db.get('SELECT sort_order FROM packs WHERE id = ?', [req.params.id], (err, row) => {
-    if (err) return res.status(500).json({ error: 'Database error' });
-    if (!row) return res.status(404).json({ error: 'Not found' });
-    const currentSort = row.sort_order;
-    const targetSort = currentSort + direction;
-    db.get('SELECT id FROM packs WHERE sort_order = ? AND id != ?', [targetSort, req.params.id], (err2, target) => {
-      if (err2) return res.status(500).json({ error: 'Database error' });
-      if (!target) return res.json({ message: 'Cannot move further' });
-      db.serialize(() => {
-        db.run('BEGIN TRANSACTION');
-        db.run('UPDATE packs SET sort_order = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [targetSort, req.params.id]);
-        db.run('UPDATE packs SET sort_order = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [currentSort, target.id]);
-        db.run('COMMIT', (err3) => { if (err3) { db.run('ROLLBACK'); return res.status(500).json({ error: 'Reorder failed' }); } res.json({ message: 'Reordered' }); });
+function renderServiceList(services) {
+  const list = document.getElementById('service-list');
+  if (!services || services.length === 0) {
+    list.innerHTML = '<p style="color:var(--color-text-muted);">No services yet.</p>';
+    return;
+  }
+  list.innerHTML = services.map((s) => `
+    <div class="admin-item" data-id="${s.id}">
+      <div style="display:flex;flex-direction:column;gap:0.4rem;">
+        <input type="text" value="${escapeHtml(s.title)}" data-field="title" placeholder="Service name" />
+        <input type="text" value="${escapeHtml(s.tag || '')}" data-field="tag" placeholder="Category tag" />
+        <input type="text" value="${escapeHtml(s.description || '')}" data-field="description" placeholder="Description" />
+        <div style="display:flex;gap:0.5rem;align-items:center;margin-top:0.3rem;">
+          <label style="display:flex;align-items:center;gap:0.5rem;margin:0;cursor:pointer;">
+            <input type="checkbox" data-field="published" ${s.published ? 'checked' : ''} />
+            <span style="font-size:0.9rem;">Show on website</span>
+          </label>
+          <button type="button" class="btn-move btn-move-up" onclick="moveService(${s.id}, -1)" title="Move up">↑</button>
+          <button type="button" class="btn-move btn-move-down" onclick="moveService(${s.id}, 1)" title="Move down">↓</button>
+        </div>
+      </div>
+      <button class="btn-delete" onclick="deleteService(${s.id})">Delete</button>
+    </div>
+  `).join('');
+
+  list.querySelectorAll('.admin-item').forEach((item) => {
+    const id = item.dataset.id;
+    item.querySelectorAll('input').forEach((input) => {
+      if (input.type === 'file') return;
+      input.addEventListener('change', () => {
+        const field = input.dataset.field;
+        let value = input.type === 'checkbox' ? input.checked : input.value;
+        updateService(id, field, value);
+        markUnsaved();
       });
     });
   });
+}
+
+window.updateService = async (id, field, value) => {
+  try {
+    await api(`/api/admin/services/${id}`, { method: 'PUT', body: JSON.stringify({ [field]: value }) });
+    showMsg('msg-services', 'Service updated.', 'success');
+  } catch (err) {
+    showMsg('msg-services', err.data?.error || 'Update failed.', 'error');
+  }
+};
+
+window.deleteService = async (id) => {
+  if (!confirm('Delete this service?')) return;
+  try {
+    await api(`/api/admin/services/${id}`, { method: 'DELETE' });
+    loadServices();
+    showMsg('msg-services', 'Service deleted.', 'success');
+  } catch (err) {
+    showMsg('msg-services', err.data?.error || 'Delete failed.', 'error');
+  }
+};
+
+window.moveService = async (id, direction) => {
+  try {
+    await api(`/api/admin/services/${id}/move`, { method: 'POST', body: JSON.stringify({ direction }) });
+    loadServices();
+    showMsg('msg-services', 'Service order updated.', 'success');
+  } catch (err) {
+    showMsg('msg-services', err.data?.error || 'Reorder failed.', 'error');
+  }
+};
+
+document.getElementById('form-new-service').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = e.target.querySelector('button[type="submit"]');
+  btn.disabled = true;
+  btn.textContent = 'Adding...';
+  try {
+    await api('/api/admin/services', {
+      method: 'POST',
+      body: JSON.stringify({
+        title: document.getElementById('ns-title').value,
+        tag: document.getElementById('ns-tag').value,
+        description: document.getElementById('ns-desc').value,
+        published: true,
+      }),
+    });
+    document.getElementById('ns-title').value = '';
+    document.getElementById('ns-tag').value = '';
+    document.getElementById('ns-desc').value = '';
+    loadServices();
+    showMsg('msg-services', 'Service added.', 'success');
+  } catch (err) {
+    showMsg('msg-services', err.data?.error || 'Add failed.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Add service';
+  }
 });
 
-app.post('/api/admin/packs/:packId/features', authenticateAdmin, (req, res) => {
-  const { feature, sort_order } = req.body;
-  if (!feature) return res.status(400).json({ error: 'Feature text required' });
-  db.run('INSERT INTO pack_features (pack_id, feature, sort_order) VALUES (?, ?, ?)', [req.params.packId, feature, sort_order || 0], function (err) { if (err) return res.status(500).json({ error: 'Database error' }); res.status(201).json({ id: this.lastID }); });
+/* ---------- Packs Tab ---------- */
+async function loadPacks() {
+  try {
+    const packs = await api('/api/admin/packs');
+    renderPackList(packs);
+  } catch (err) {
+    showMsg('msg-packs', 'Failed to load packs', 'error');
+  }
+}
+
+function renderPackList(packs) {
+  const list = document.getElementById('pack-list');
+  if (!packs || packs.length === 0) {
+    list.innerHTML = '<p style="color:var(--color-text-muted);">No packs yet.</p>';
+    return;
+  }
+  list.innerHTML = packs.map((p) => `
+    <div class="admin-item" data-id="${p.id}">
+      <div style="display:flex;flex-direction:column;gap:0.4rem;">
+        <input type="text" value="${escapeHtml(p.name)}" data-field="name" placeholder="Pack name" />
+        <input type="text" value="${escapeHtml(p.price || '')}" data-field="price" placeholder="Price (₹)" />
+        <input type="text" value="${escapeHtml(p.badge || '')}" data-field="badge" placeholder="Badge" />
+        <div style="display:flex;gap:0.5rem;align-items:center;margin-top:0.3rem;">
+          <label style="display:flex;align-items:center;gap:0.5rem;margin:0;cursor:pointer;">
+            <input type="checkbox" data-field="published" ${p.published ? 'checked' : ''} />
+            <span style="font-size:0.9rem;">Show on website</span>
+          </label>
+          <label style="display:flex;align-items:center;gap:0.5rem;margin:0;cursor:pointer;">
+            <input type="checkbox" data-field="is_featured" ${p.is_featured ? 'checked' : ''} />
+            <span style="font-size:0.9rem;">Featured</span>
+          </label>
+          <button type="button" class="btn-move btn-move-up" onclick="movePack(${p.id}, -1)" title="Move up">↑</button>
+          <button type="button" class="btn-move btn-move-down" onclick="movePack(${p.id}, 1)" title="Move down">↓</button>
+        </div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:0.4rem;flex:1;">
+        <strong style="font-size:0.85rem;color:var(--color-text-muted);">Features</strong>
+        <div class="feature-list" data-pack-id="${p.id}">
+          ${(p.features || []).map((f) => `
+            <div class="feature-row" style="display:flex;gap:0.4rem;align-items:center;margin-bottom:0.3rem;">
+              <input type="text" value="${escapeHtml(f.feature || f)}" data-field="feature" data-feature-id="${f.id || ''}" data-pack-id="${p.id}" />
+              <button class="btn-delete" style="padding:0.2rem 0.5rem;font-size:0.8rem;" onclick="deletePackFeature(${p.id}, '${f.id || ''}')">×</button>
+            </div>
+          `).join('')}
+          <button type="button" class="btn-add" style="padding:0.4rem 0.8rem;font-size:0.85rem;" onclick="addPackFeature(${p.id})">+ Add feature</button>
+        </div>
+      </div>
+      <button class="btn-delete" onclick="deletePack(${p.id})">Delete</button>
+    </div>
+  `).join('');
+
+  list.querySelectorAll('.admin-item').forEach((item) => {
+    const id = item.dataset.id;
+    item.querySelectorAll('input').forEach((input) => input.addEventListener('change', () => {
+      const field = input.dataset.field;
+      if (field === 'feature') {
+        updatePackFeature(input.dataset.packId, input.dataset.featureId, input.value);
+        markUnsaved();
+        return;
+      }
+      let value = input.type === 'checkbox' ? input.checked : input.value;
+      updatePack(id, field, value);
+      markUnsaved();
+    }));
+  });
+}
+
+window.updatePack = async (id, field, value) => {
+  try {
+    await api(`/api/admin/packs/${id}`, { method: 'PUT', body: JSON.stringify({ [field]: value }) });
+    showMsg('msg-packs', 'Pack updated.', 'success');
+  } catch (err) {
+    showMsg('msg-packs', err.data?.error || 'Update failed.', 'error');
+  }
+};
+
+window.updatePackFeature = async (packId, featureId, value) => {
+  try {
+    await api(`/api/admin/packs/${packId}/features/${featureId}`, { method: 'PUT', body: JSON.stringify({ feature: value }) });
+    showMsg('msg-packs', 'Feature updated.', 'success');
+  } catch (err) {
+    showMsg('msg-packs', err.data?.error || 'Update failed.', 'error');
+  }
+};
+
+window.addPackFeature = async (packId) => {
+  try {
+    await api(`/api/admin/packs/${packId}/features`, { method: 'POST', body: JSON.stringify({ feature: '', sort_order: 0 }) });
+    loadPacks();
+  } catch (err) {
+    showMsg('msg-packs', err.data?.error || 'Add feature failed.', 'error');
+  }
+};
+
+window.deletePackFeature = async (packId, featureId) => {
+  if (!featureId) { loadPacks(); return; }
+  if (!confirm('Delete this feature?')) return;
+  try {
+    await api(`/api/admin/packs/${packId}/features/${featureId}`, { method: 'DELETE' });
+    loadPacks();
+    showMsg('msg-packs', 'Feature deleted.', 'success');
+  } catch (err) {
+    showMsg('msg-packs', err.data?.error || 'Delete failed.', 'error');
+  }
+};
+
+window.deletePack = async (id) => {
+  if (!confirm('Delete this pack?')) return;
+  try {
+    await api(`/api/admin/packs/${id}`, { method: 'DELETE' });
+    loadPacks();
+    showMsg('msg-packs', 'Pack deleted.', 'success');
+  } catch (err) {
+    showMsg('msg-packs', err.data?.error || 'Delete failed.', 'error');
+  }
+};
+
+window.movePack = async (id, direction) => {
+  try {
+    await api(`/api/admin/packs/${id}/move`, { method: 'POST', body: JSON.stringify({ direction }) });
+    loadPacks();
+    showMsg('msg-packs', 'Pack order updated.', 'success');
+  } catch (err) {
+    showMsg('msg-packs', err.data?.error || 'Reorder failed.', 'error');
+  }
+};
+
+document.getElementById('form-new-pack').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = e.target.querySelector('button[type="submit"]');
+  btn.disabled = true;
+  btn.textContent = 'Adding...';
+  const featuresText = document.getElementById('np-features').value;
+  const features = featuresText.split('\n').map((f) => f.trim()).filter((f) => f.length > 0);
+  try {
+    await api('/api/admin/packs', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: document.getElementById('np-name').value,
+        price: document.getElementById('np-price').value,
+        badge: document.getElementById('np-badge').value,
+        features,
+        published: true,
+      }),
+    });
+    document.getElementById('np-name').value = '';
+    document.getElementById('np-price').value = '';
+    document.getElementById('np-badge').value = '';
+    document.getElementById('np-features').value = '';
+    loadPacks();
+    showMsg('msg-packs', 'Pack added.', 'success');
+  } catch (err) {
+    showMsg('msg-packs', err.data?.error || 'Add failed.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Add pack';
+  }
 });
 
-app.put('/api/admin/packs/:packId/features/:featureId', authenticateAdmin, (req, res) => {
-  const { feature } = req.body;
-  if (!feature) return res.status(400).json({ error: 'Feature text required' });
-  db.run('UPDATE pack_features SET feature = ? WHERE id = ? AND pack_id = ?', [feature, req.params.featureId, req.params.packId], function (err) { if (err) return res.status(500).json({ error: 'Database error' }); if (this.changes === 0) return res.status(404).json({ error: 'Not found' }); res.json({ message: 'Updated' }); });
-});
+/* ---------- Team Tab ---------- */
+async function loadTeam() {
+  try {
+    const team = await api('/api/admin/team');
+    renderTeamList(team);
+  } catch (err) {
+    showMsg('msg-team', 'Failed to load team', 'error');
+  }
+}
 
-app.delete('/api/admin/packs/:packId/features/:featureId', authenticateAdmin, (req, res) => {
-  db.run('DELETE FROM pack_features WHERE id = ? AND pack_id = ?', [req.params.featureId, req.params.packId], function (err) { if (err) return res.status(500).json({ error: 'Database error' }); if (this.changes === 0) return res.status(404).json({ error: 'Not found' }); res.json({ message: 'Deleted' }); });
-});
+function renderTeamList(team) {
+  const list = document.getElementById('member-list');
+  if (!team || team.length === 0) {
+    list.innerHTML = '<p style="color:var(--color-text-muted);">No team members yet.</p>';
+    return;
+  }
+  list.innerHTML = team.map((m) => `
+    <div class="admin-item" data-id="${m.id}">
+      <div style="display:flex;flex-direction:column;gap:0.4rem;">
+        <input type="text" value="${escapeHtml(m.name)}" data-field="name" placeholder="Name" />
+        <input type="text" value="${escapeHtml(m.role || '')}" data-field="role" placeholder="Role" />
+        <input type="text" value="${escapeHtml(m.description || '')}" data-field="description" placeholder="Description" />
+        <input type="file" id="tm-file-${m.id}" accept="image/*" onchange="uploadMemberImage(${m.id}, this)" />
+        <input type="hidden" id="tm-url-${m.id}" value="${escapeHtml(m.image_url || '')}" />
+      </div>
+      <div class="image-preview" id="preview-${m.id}"><img src="${m.image_url || '../assets/team-placeholder.svg'}" alt="Preview" width="80" height="80" /></div>
+      <div style="display:flex;gap:0.5rem;align-items:center;margin-top:0.3rem;">
+        <label style="display:flex;align-items:center;gap:0.5rem;margin:0;cursor:pointer;">
+          <input type="checkbox" data-field="published" ${m.published ? 'checked' : ''} />
+          <span style="font-size:0.9rem;">Show on website</span>
+        </label>
+        <button type="button" class="btn-move btn-move-up" onclick="moveMember(${m.id}, -1)" title="Move up">↑</button>
+        <button type="button" class="btn-move btn-move-down" onclick="moveMember(${m.id}, 1)" title="Move down">↓</button>
+      </div>
+      <button class="btn-delete" onclick="deleteMember(${m.id})">Delete</button>
+    </div>
+  `).join('');
 
-// Team CRUD
-app.get('/api/admin/team', authenticateAdmin, (req, res) => {
-  db.all('SELECT * FROM team_members ORDER BY sort_order ASC, id ASC', (err, rows) => { if (err) return res.status(500).json({ error: 'Database error' }); res.json(rows); });
-});
-
-app.post('/api/admin/team', authenticateAdmin, (req, res) => {
-  const { name, role, description, image_url, published, sort_order } = req.body;
-  if (!name) return res.status(400).json({ error: 'Name required' });
-  db.run('INSERT INTO team_members (name, role, description, image_url, published, sort_order) VALUES (?, ?, ?, ?, ?, ?)', [name, role || '', description || '', image_url || null, published ? 1 : 0, sort_order || 0], function (err) { if (err) return res.status(500).json({ error: 'Database error' }); res.status(201).json({ id: this.lastID }); });
-});
-
-app.put('/api/admin/team/:id', authenticateAdmin, (req, res) => {
-  const { name, role, description, image_url, published, sort_order } = req.body;
-  db.run('UPDATE team_members SET name = COALESCE(?, name), role = COALESCE(?, role), description = COALESCE(?, description), image_url = COALESCE(?, image_url), published = COALESCE(?, published), sort_order = COALESCE(?, sort_order), updated_at = CURRENT_TIMESTAMP WHERE id = ?', [name, role, description, image_url, published, sort_order, req.params.id], function (err) { if (err) return res.status(500).json({ error: 'Database error' }); if (this.changes === 0) return res.status(404).json({ error: 'Not found' }); res.json({ message: 'Updated' }); });
-});
-
-app.delete('/api/admin/team/:id', authenticateAdmin, (req, res) => {
-  db.run('DELETE FROM team_members WHERE id = ?', [req.params.id], function (err) { if (err) return res.status(500).json({ error: 'Database error' }); if (this.changes === 0) return res.status(404).json({ error: 'Not found' }); res.json({ message: 'Deleted' }); });
-});
-
-app.post('/api/admin/team/:id/move', authenticateAdmin, (req, res) => {
-  const { direction } = req.body;
-  if (direction !== -1 && direction !== 1) return res.status(400).json({ error: 'Invalid direction' });
-  db.get('SELECT sort_order FROM team_members WHERE id = ?', [req.params.id], (err, row) => {
-    if (err) return res.status(500).json({ error: 'Database error' });
-    if (!row) return res.status(404).json({ error: 'Not found' });
-    const currentSort = row.sort_order;
-    const targetSort = currentSort + direction;
-    db.get('SELECT id FROM team_members WHERE sort_order = ? AND id != ?', [targetSort, req.params.id], (err2, target) => {
-      if (err2) return res.status(500).json({ error: 'Database error' });
-      if (!target) return res.json({ message: 'Cannot move further' });
-      db.serialize(() => {
-        db.run('BEGIN TRANSACTION');
-        db.run('UPDATE team_members SET sort_order = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [targetSort, req.params.id]);
-        db.run('UPDATE team_members SET sort_order = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [currentSort, target.id]);
-        db.run('COMMIT', (err3) => { if (err3) { db.run('ROLLBACK'); return res.status(500).json({ error: 'Reorder failed' }); } res.json({ message: 'Reordered' }); });
+  list.querySelectorAll('.admin-item').forEach((item) => {
+    const id = item.dataset.id;
+    item.querySelectorAll('input').forEach((input) => {
+      if (input.type === 'file') return;
+      input.addEventListener('change', () => {
+        const field = input.dataset.field;
+        let value = input.type === 'checkbox' ? input.checked : input.value;
+        updateMember(id, field, value);
+        markUnsaved();
       });
     });
   });
+}
+
+async function uploadMemberImage(memberId, fileInput) {
+  const file = fileInput.files[0];
+  if (!file) return;
+
+  const formData = new FormData();
+  formData.append('image', file);
+
+  try {
+    const res = await fetch(`${API_BASE}/api/admin/upload-image`, {
+      method: 'POST',
+      credentials: 'include',
+      body: formData,
+    });
+    const data = await res.json();
+    if (res.ok && data.imageUrl) {
+      document.getElementById(`preview-${memberId}`).querySelector('img').src = data.imageUrl;
+      document.getElementById(`tm-url-${memberId}`).value = data.imageUrl;
+      await api(`/api/admin/team/${memberId}`, {
+        method: 'PUT',
+        body: JSON.stringify({ image_url: data.imageUrl }),
+      });
+      showMsg('msg-team', 'Photo uploaded.', 'success');
+      markUnsaved();
+    } else {
+      showMsg('msg-team', 'Photo upload failed.', 'error');
+    }
+  } catch (err) {
+    showMsg('msg-team', 'Photo upload error.', 'error');
+  }
+}
+
+window.updateImagePreview = (id, url) => {
+  const img = document.getElementById(`preview-${id}`).querySelector('img');
+  if (img) img.src = url || '../assets/team-placeholder.svg';
+};
+
+window.updateMember = async (id, field, value) => {
+  try {
+    await api(`/api/admin/team/${id}`, { method: 'PUT', body: JSON.stringify({ [field]: value }) });
+    showMsg('msg-team', 'Member updated.', 'success');
+  } catch (err) {
+    showMsg('msg-team', err.data?.error || 'Update failed.', 'error');
+  }
+};
+
+window.deleteMember = async (id) => {
+  if (!confirm('Delete this team member?')) return;
+  try {
+    await api(`/api/admin/team/${id}`, { method: 'DELETE' });
+    loadTeam();
+    showMsg('msg-team', 'Member deleted.', 'success');
+  } catch (err) {
+    showMsg('msg-team', err.data?.error || 'Delete failed.', 'error');
+  }
+};
+
+window.moveMember = async (id, direction) => {
+  try {
+    await api(`/api/admin/team/${id}/move`, { method: 'POST', body: JSON.stringify({ direction }) });
+    loadTeam();
+    showMsg('msg-team', 'Member order updated.', 'success');
+  } catch (err) {
+    showMsg('msg-team', err.data?.error || 'Reorder failed.', 'error');
+  }
+};
+
+document.getElementById('form-new-member').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = e.target.querySelector('button[type="submit"]');
+  btn.disabled = true;
+  btn.textContent = 'Adding...';
+  try {
+    let imageUrl = '';
+    const file = document.getElementById('nm-file').files[0];
+    if (file) {
+      const formData = new FormData();
+      formData.append('image', file);
+      const res = await fetch(`${API_BASE}/api/admin/upload-image`, {
+        method: 'POST',
+        credentials: 'include',
+        body: formData,
+      });
+      const data = await res.json();
+      if (res.ok && data.imageUrl) {
+        imageUrl = data.imageUrl;
+      }
+    }
+
+    await api('/api/admin/team', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: document.getElementById('nm-name').value,
+        role: document.getElementById('nm-role').value,
+        description: document.getElementById('nm-desc').value,
+        image_url: imageUrl,
+        published: true,
+      }),
+    });
+    document.getElementById('nm-name').value = '';
+    document.getElementById('nm-role').value = '';
+    document.getElementById('nm-desc').value = '';
+    document.getElementById('nm-file').value = '';
+    loadTeam();
+    showMsg('msg-team', 'Member added.', 'success');
+  } catch (err) {
+    showMsg('msg-team', err.data?.error || 'Add failed.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Add member';
+  }
 });
 
-app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
+/* ---------- Contact Tab ---------- */
+const contactFields = ['whatsapp', 'contact_email', 'instagram'];
 
-app.get('/', (req, res) => res.sendFile(path.join(__dirname, '..', 'index.html')));
-app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, '..', 'admin', 'index.html'));
+async function loadContactForm() {
+  try {
+    const settings = await api('/api/admin/settings');
+    contactFields.forEach((key) => {
+      const el = document.getElementById(`c-${key}`);
+      if (el && settings[key] !== undefined) el.value = settings[key];
+    });
+  } catch (err) {
+    showMsg('msg-contact', 'Failed to load contact details', 'error');
+  }
+}
 
-app.listen(PORT, () => console.log(`LoopCampus backend running on http://localhost:${PORT}`));
+document.getElementById('form-contact').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = e.target.querySelector('button[type="submit"]');
+  btn.disabled = true;
+  btn.textContent = 'Saving...';
+  const payload = {};
+  contactFields.forEach((key) => {
+    const el = document.getElementById(`c-${key}`);
+    if (el) payload[key] = el.value;
+  });
+  try {
+    await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify(payload) });
+    showMsg('msg-contact', 'Contact details saved.', 'success');
+    clearUnsaved();
+  } catch (err) {
+    showMsg('msg-contact', err.data?.error || 'Save failed.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Save contact details';
+  }
+});
 
-module.exports = app;
+/* ---------- Publish Tab ---------- */
+let lastPublishedAt = null;
+
+async function loadPublishStatus() {
+  try {
+    const [services, packs, team] = await Promise.all([
+      api('/api/admin/services'), api('/api/admin/packs'), api('/api/admin/team'),
+    ]);
+    const pending = services.filter((s) => !s.published).length +
+      packs.filter((p) => !p.published).length +
+      team.filter((t) => !t.published).length;
+    document.getElementById('pending-count').textContent = pending;
+    document.getElementById('last-published').textContent = lastPublishedAt || 'Never';
+  } catch (err) {
+    console.error('Publish status failed:', err);
+  }
+}
+
+document.getElementById('btn-save-draft').addEventListener('click', async () => {
+  try {
+    await Promise.all([loadHomeForm(), loadServices(), loadPacks(), loadTeam(), loadImageForm(), loadContactForm()]);
+    showMsg('msg-publish', 'All changes saved to draft.', 'success');
+    clearUnsaved();
+  } catch (err) {
+    showMsg('msg-publish', 'Save failed.', 'error');
+  }
+});
+
+document.getElementById('btn-publish').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-publish');
+  btn.disabled = true;
+  btn.textContent = 'Publishing...';
+  try {
+    const [services, packs, team] = await Promise.all([
+      api('/api/admin/services'), api('/api/admin/packs'), api('/api/admin/team'),
+    ]);
+    const updates = [];
+    services.filter((s) => !s.published).forEach((s) =>
+      updates.push(api(`/api/admin/services/${s.id}`, { method: 'PUT', body: JSON.stringify({ published: true }) }))
+    );
+    packs.filter((p) => !p.published).forEach((p) =>
+      updates.push(api(`/api/admin/packs/${p.id}`, { method: 'PUT', body: JSON.stringify({ published: true }) }))
+    );
+    team.filter((t) => !t.published).forEach((t) =>
+      updates.push(api(`/api/admin/team/${t.id}`, { method: 'PUT', body: JSON.stringify({ published: true }) }))
+    );
+    await Promise.all(updates);
+    lastPublishedAt = new Date().toLocaleDateString();
+    await loadPublishStatus();
+    showMsg('msg-publish', 'Published to loopcampus.online!', 'success');
+    clearUnsaved();
+  } catch (err) {
+    showMsg('msg-publish', err.data?.error || 'Publish failed.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Publish now';
+  }
+});
+
+function showMsg(id, text, type = 'success') {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = text;
+  el.className = `msg ${type === 'error' ? 'error' : 'success'}`;
+  setTimeout(() => { el.textContent = ''; }, 4000);
+}
+
+function escapeHtml(text) {
+  if (!text) return '';
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+(async function init() {
+  const auth = await checkAuth();
+  if (auth) {
+    isAuthenticated = true;
+    showScreen('dashboard');
+    await loadHomeForm();
+    loadImageForm();
+    loadContactForm();
+    loadPublishStatus();
+  } else {
+    showScreen('login');
+  }
+})();
